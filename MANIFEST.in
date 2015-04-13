@@ -1,0 +1,4 @@
+include README.md
+include setup.py
+include pytest_ubersmith.py
+include test_pytest_ubersmith.py
