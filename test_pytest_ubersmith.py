@@ -55,17 +55,40 @@ def test_calls(ubermock):
     assert ubermock.client.get.call_count == 0
     assert ubermock.client.get.calls == []
 
-    assert ubersmith.client.get(client_id=123) == client_resp
+    assert ubersmith.client.get(client_id=123, other_thing=456) == client_resp
 
     assert ubermock.client.get.called
     assert ubermock.client.get.call_count == 1
     assert len(ubermock.client.get.calls) == 1
 
-    record = ubermock.client.get.calls[0]
+    record = ubermock.client.get.last_call
+    assert record == ubermock.client.get.calls[-1]
     assert record.params['client_id'] == '123'
-    assert record.response == {
+    assert record.raw_response == {
         'status': True,
         'error_message': '',
         'error_code': None,
         'data': client_resp,
     }
+    assert record.response == client_resp
+
+    record.assert_called_with(client_id=123)
+    record.assert_called_with(other_thing=456)
+    record.assert_called_with(client_id=123, other_thing=456)
+    record.assert_called_with_exactly(client_id=123, other_thing=456)
+
+    with pytest.raises(AssertionError):
+        record.assert_called_with(not_passed=123)
+    with pytest.raises(AssertionError):
+        record.assert_called_with(client_id='shfourteenteen')
+    with pytest.raises(AssertionError):
+        record.assert_called_with_exactly()
+
+    ubermock.client.get.assert_called_once_with(client_id=123)
+    ubermock.client.get.assert_called_once_with_exactly(client_id=123,
+                                                        other_thing=456)
+
+    with pytest.raises(AssertionError):
+        ubermock.client.get.assert_called_once_with(not_passed=123)
+    with pytest.raises(AssertionError):
+        ubermock.client.get.assert_called_once_with_exactly()

@@ -5,6 +5,7 @@ import requests_mock
 
 import ubersmith
 import ubersmith.api
+from ubersmith.utils import to_nested_php_args
 
 
 _unset_value = object()
@@ -28,17 +29,68 @@ class MockResponseError(Exception):
 
 
 class CallRecord(object):
-    def __init__(self, mock, method, params, request, context, response):
+    def __init__(self, mock, method, params, request, context, resp_obj):
         self.mock = mock
         self.method = method
         self.params = params
         self.request = request
         self.context = context
-        self.response = response
+
+        if isinstance(resp_obj, MockResponseError):
+            self.raw_response = resp_obj.to_response()
+            self.response = resp_obj
+        else:
+            self.response = resp_obj['data']
+            self.raw_response = resp_obj
+
+    ################################################
+    # Public interface and important magic methods #
+    ################################################
+
+    def __eq__(self, other):
+        return self.__dict__ == other.__dict__
+
+    def __contains__(self, item):
+        return item in self.params
 
     def was_successful(self):
         # This may be a MockResponseError, but that, too, has a status attr
         return self.response.status
+
+    def assert_called_with(self, **params):
+        """Must have been called with *at least* params. Extra values okay."""
+        missing = []
+        incorrect = []
+        for key, value in self._sanitize_params(params).items():
+            if key not in self.params:
+                missing.append(key)
+            elif self.params[key] != value:
+                incorrect.append((key, value, self.params[key]))
+
+        if missing or incorrect:
+            parts = []
+            if missing:
+                parts.append('missing parameters %s' % ', '.join(
+                    repr(p) for p in missing))
+            for key, expected, found in incorrect:
+                parts.append('expected value %r for key %r, found %r' % (
+                    expected, key, found))
+            raise AssertionError('; '.join(parts).capitalize())
+        else:
+            return True  # Allow assert call.assert_called_with
+
+    def assert_called_with_exactly(self, **params):
+        """Must have exactly params, no more, no less."""
+        assert self._sanitize_params(params) == self.params
+        return True  # assert call.assert_called_with_exactly
+
+    ###############################
+    # Private methods and helpers #
+    ###############################
+
+    def _sanitize_params(self, params):
+        return {k: str(v) for k, v in to_nested_php_args(params).items()}
+
 
 @pytest.yield_fixture
 def reqmock():
@@ -124,36 +176,17 @@ def ubermock(reqmock, monkeypatch):
 
             # Register ourself
             mocks[self.key] = self
-            if self.is_valid_call(self.key):
+            if self._is_valid_call(self.key):
                 calls[self.key] = self
 
-        def _get_fq_key(self, *key_parts):
-            parts = []
-            if self.key:
-                parts.append(self.key)
-            parts += list(key_parts)
-            return '.'.join(parts)
-
-        def is_valid_call(self, key):
-            return key in ubersmith.api.METHODS
-
-        def validate_call(self, key):
-            if not self.is_valid_call(key):
-                raise KeyError('%s is not a valid Ubersmith API call' % key)
-
-        def _get_mock(self, key):
-            if key not in mocks:
-                return UberMock(key)
-            return mocks[key]
-
-        def _get_call(self, key):
-            self.validate_call(key)
-            return self._get_mock(key)
+        ################################################
+        # Public interface and important magic methods #
+        ################################################
 
         def __setattr__(self, key, value):
             if key in self.__dict__:
                 if key in {'response', 'raw_response'} and \
-                        not self.is_valid_call(self.key):
+                        not self._is_valid_call(self.key):
                     raise Exception('%s is not a valid Ubersmith API call' %
                                     self.key)
                 self.__dict__[key] = value
@@ -165,6 +198,73 @@ def ubermock(reqmock, monkeypatch):
         def __getattr__(self, key):
             full_key = self._get_fq_key(key)
             return self._get_mock(full_key)
+
+        def __call__(self, method, params, request, context):
+            try:
+                resp = self._build_response(method, params, request, context)
+            except MockResponseError as resp:
+                pass
+
+            self._record_call(method, params, request, context, resp)
+            return resp
+
+        @property
+        def last_call(self):
+            return self.calls[-1]
+
+        @property
+        def first_call(self):
+            return self.calls[0]
+
+        def assert_called_once_with(self, **params):
+            for record in self.calls:
+                try:
+                    return record.assert_called_with(**params)
+                except AssertionError:
+                    continue
+            else:
+                raise AssertionError(
+                    '%s was never called with params %r' % (self.key, params))
+
+        def assert_called_once_with_exactly(self, **params):
+            for record in self.calls:
+                try:
+                    return record.assert_called_with_exactly(**params)
+                except AssertionError:
+                    continue
+            else:
+                raise AssertionError(
+                    '%s was never called with exactly the params %r' % (
+                        self.key, params))
+
+        ###############################
+        # Private methods and helpers #
+        ###############################
+
+        def _get_fq_key(self, *key_parts):
+            parts = []
+            if self.key:
+                parts.append(self.key)
+            parts += list(key_parts)
+            return '.'.join(parts)
+
+        @staticmethod
+        def _is_valid_call(key):
+            return key in ubersmith.api.METHODS
+
+        @classmethod
+        def _validate_call(cls, key):
+            if not cls._is_valid_call(key):
+                raise KeyError('%s is not a valid Ubersmith API call' % key)
+
+        def _get_mock(self, key):
+            if key not in mocks:
+                return UberMock(key)
+            return mocks[key]
+
+        def _get_call(self, key):
+            self._validate_call(key)
+            return self._get_mock(key)
 
         def _wrap_response(self, response):
             def _response_method(method, params, request, context):
@@ -191,25 +291,16 @@ def ubermock(reqmock, monkeypatch):
             elif self.response is not _unset_value:
                 return self._wrap_response(self.response)
 
-        def build_response(self, method, params, request, context):
+        def _build_response(self, method, params, request, context):
             meth = self._get_response_method()
             if meth is None:
                 raise Exception('No response setup for API call %s' % self.key)
             return meth(method, params, request, context)
 
-        def _record_call(self, method, params, request, context, response):
+        def _record_call(self, method, params, request, context, resp_obj):
                 self.called = True
                 self.call_count += 1
                 self.calls.append(CallRecord(
-                    self, method, params, request, context, response))
-
-        def __call__(self, method, params, request, context):
-            try:
-                resp = self.build_response(method, params, request, context)
-            except MockResponseError as resp:
-                pass
-
-            self._record_call(method, params, request, context, resp)
-            return resp
+                    self, method, params, request, context, resp_obj))
 
     return UberMock()
