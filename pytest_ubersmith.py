@@ -7,6 +7,39 @@ import ubersmith
 import ubersmith.api
 
 
+_unset_value = object()
+
+
+class MockResponseError(Exception):
+    def __init__(self, error_message='Error!', error_code=-1, status=False,
+                 data=''):
+        self.error_message = error_message
+        self.error_code = error_code
+        self.status = status
+        self.data = data
+
+    def to_response(self):
+        return {
+            'error_message': self.error_message,
+            'error_code': self.error_code,
+            'status': self.status,
+            'data': self.data,
+        }
+
+
+class CallRecord(object):
+    def __init__(self, mock, method, params, request, context, response):
+        self.mock = mock
+        self.method = method
+        self.params = params
+        self.request = request
+        self.context = context
+        self.response = response
+
+    def was_successful(self):
+        # This may be a MockResponseError, but that, too, has a status attr
+        return self.response.status
+
 @pytest.yield_fixture
 def reqmock():
     """Allows patching of HTTP requests"""
@@ -23,24 +56,6 @@ def ubermock(reqmock, monkeypatch):
     mocks = {}
     # Only valid calls (like 'client.add' and 'uber.user_exists')
     calls = {}
-
-    _unset_value = object()
-
-    class MockResponseError(Exception):
-        def __init__(self, error_message='Error!', error_code=-1,
-                     status=False, data=''):
-            self.error_message = error_message
-            self.error_code = error_code
-            self.status = status
-            self.data = data
-
-        def to_response(self):
-            return {
-                'error_message': self.error_message,
-                'error_code': self.error_code,
-                'status': self.status,
-                'data': self.data,
-            }
 
     def ubermock_call(request, context):
         # qs is MultiDict
@@ -60,8 +75,13 @@ def ubermock(reqmock, monkeypatch):
         mock = calls[method]
         params = urlparse.parse_qs(request.text or '',
                                    keep_blank_values=True)
+
+        # parse_qs returns a MultiDict. Since python-ubersmith breaks out lists
+        # into p[0] ... p[n], we have no need for this.
+        params = {k: v[0] for k, v in params.items()}
+
         try:
-            resp = mock.build_response(method, params, request, context)
+            resp = mock(method, params, request, context)
             if isinstance(resp, MockResponseError):
                 raise resp
         except MockResponseError as e:
@@ -81,14 +101,26 @@ def ubermock(reqmock, monkeypatch):
         url = mock_url
 
         def __init__(self, key=None):
-            self.__dict__['key'] = key
-            self.__dict__['ignore_missing'] = False
+            # We override __setattr__, so this is just easier
+            self.__dict__.update({
+                # The full dotted path of this mock/call
+                'key': key,
 
-            # Holds the 'data' part of the response, if we're a call
-            # May be a callable
-            self.__dict__['response'] = _unset_value
-            # The entire response, if needed
-            self.__dict__['raw_response'] = _unset_value
+                # Whether to ignore calls which don't have a response setup.
+                # This is on every UberMock, but only the root one matters.
+                'ignore_missing': False,
+
+                # Holds the 'data' part of the response, if we're a call
+                # May be a callable
+                'response': _unset_value,
+                # The entire response as returned by Ubersmith, if needed
+                'raw_response': _unset_value,
+
+                # Bookkeeping
+                'called': False,
+                'call_count': 0,
+                'calls': [],
+            })
 
             # Register ourself
             mocks[self.key] = self
@@ -108,8 +140,6 @@ def ubermock(reqmock, monkeypatch):
         def validate_call(self, key):
             if not self.is_valid_call(key):
                 raise KeyError('%s is not a valid Ubersmith API call' % key)
-            else:
-                return True
 
         def _get_mock(self, key):
             if key not in mocks:
@@ -166,5 +196,20 @@ def ubermock(reqmock, monkeypatch):
             if meth is None:
                 raise Exception('No response setup for API call %s' % self.key)
             return meth(method, params, request, context)
+
+        def _record_call(self, method, params, request, context, response):
+                self.called = True
+                self.call_count += 1
+                self.calls.append(CallRecord(
+                    self, method, params, request, context, response))
+
+        def __call__(self, method, params, request, context):
+            try:
+                resp = self.build_response(method, params, request, context)
+            except MockResponseError as resp:
+                pass
+
+            self._record_call(method, params, request, context, resp)
+            return resp
 
     return UberMock()

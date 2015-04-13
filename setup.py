@@ -28,7 +28,7 @@ setup(
     author='Zach Kanzler',
     author_email='zkanzler@hivelocity.net',
     url='https://github.com/hivelocity/pytest-ubersmith',
-    version='1.0.2',
+    version='1.1.0-pre',
     description='Easily mock calls to ubersmith at the `requests` level.',
     long_description=open('README.rst').read().strip(),
     license='MIT License',
