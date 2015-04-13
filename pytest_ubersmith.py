@@ -78,6 +78,7 @@ def ubermock(reqmock, monkeypatch):
 
     class UberMock(object):
         ResponseError = MockResponseError
+        url = mock_url
 
         def __init__(self, key=None):
             self.__dict__['key'] = key
