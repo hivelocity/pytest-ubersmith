@@ -8,8 +8,14 @@ def test_add_client(ubermock):
     client_id = 1234
     ubermock.client.add = client_id
 
-    assert ubersmith.client.add(login='test') == 1234
+    assert ubersmith.client.add(login='test', password='abc') == 1234
 
+    # Easy checking of calls
+    assert ubermock.client.add.called
+    assert ubermock.client.add.call_count == 1
+    ubermock.client.add.assert_called_once_with(login='test')
+    ubermock.client.add.assert_called_once_with_exactly(login='test',
+                                                        password='abc')
 
 
 def test_unknown_client(ubermock):
